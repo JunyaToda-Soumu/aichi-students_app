@@ -1,0 +1,266 @@
+import streamlit as st
+import pandas as pd
+import numpy as np
+import datetime
+
+st.set_page_config(page_title="愛知県中学生人数ダッシュボード", layout="wide")
+
+st.title("📊 愛知県 中学生人数分析ダッシュボード")
+
+# ===== CSV読み込み =====
+@st.cache_data
+def load_data():
+    df = pd.read_csv("aichi_students.csv", encoding="cp932")
+    df = df.replace("データなし", 0)
+    for col in df.columns:
+        if "年生まれ" in col:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
+
+df = load_data()
+
+# 年度カラム（新しい順）
+year_columns = sorted(
+    [col for col in df.columns if "年生まれ" in col],
+    reverse=True
+)
+
+# ---------------------------------------------------------
+# 学年・年齢計算ロジック
+# ---------------------------------------------------------
+def get_current_nendo():
+    """現在の年度（4月1日基準）を返す"""
+    now = datetime.datetime.now()
+    if now.month < 4:
+        return now.year - 1
+    else:
+        return now.year
+
+def get_grade_label(year_str):
+    """生まれ年から現在の学年・年齢を算出"""
+    try:
+        birth_year = int(year_str.replace("年生まれ", ""))
+        current_nendo = get_current_nendo()
+        diff = current_nendo - birth_year
+        
+        grade_map = {
+            13: "現在中１", 14: "現在中２", 15: "現在中３",
+            16: "現在高１", 17: "現在高２", 18: "現在高３",
+            19: "現在大１", 20: "現在大２", 21: "現在大３", 22: "現在大４"
+        }
+        
+        if diff in grade_map:
+            return grade_map[diff]
+        else:
+            age = datetime.datetime.now().year - birth_year
+            return f"現在{age}歳"
+    except:
+        return ""
+
+# 計算用設定
+current_3_grades = year_columns[0:3]
+current_j1 = year_columns[0]
+long_term_range = [col for col in year_columns if "1995年生まれ" <= col <= current_j1]
+
+# ===== レイアウト =====
+col1, col2 = st.columns([1, 4])
+
+with col1:
+    st.header("条件選択")
+
+    # ⑪ 年度範囲スライダー
+    start_year, end_year = st.select_slider(
+        "年度範囲（何年生まれ〜何年生まれ）",
+        options=year_columns,
+        value=(year_columns[-1], year_columns[0])
+    )
+    
+    label_start = get_grade_label(start_year)
+    label_end = get_grade_label(end_year)
+    st.info(f"📅 **{get_current_nendo()}年度**基準で表示中\n\n💡 範囲：**{label_start}** 〜 **{label_end}**")
+
+    # ⑳ 本部選択
+    honbu_list = sorted(df["管轄本部"].dropna().unique())
+    selected_honbu_input = st.multiselect(
+        "本部を選択", ["🟢 全本部選択"] + honbu_list,
+        default=["🟢 全本部選択"], key="ms_honbu"
+    )
+    actual_honbu = honbu_list if "🟢 全本部選択" in selected_honbu_input or not selected_honbu_input else selected_honbu_input
+
+    # ⑳’ ⑳’’ 校舎選択
+    kosha_candidate = sorted(df[df["管轄本部"].isin(actual_honbu)]["管轄校舎１"].dropna().unique())
+    if "ms_kosha" in st.session_state:
+        extra_options = [k for k in st.session_state["ms_kosha"] if k != "🔵 全校舎選択"]
+        kosha_display_options = sorted(list(set(kosha_candidate) | set(extra_options)))
+    else:
+        kosha_display_options = kosha_candidate
+
+    selected_kosha_input = st.multiselect(
+        "校舎を選択", ["🔵 全校舎選択"] + kosha_display_options,
+        default=["🔵 全校舎選択"], key="ms_kosha"
+    )
+    if "🔵 全校舎選択" in selected_kosha_input or not selected_kosha_input:
+        actual_kosha = sorted(list(set(df["管轄校舎１"].dropna().unique()) | set(df["管轄校舎２"].dropna().unique())))
+    else:
+        actual_kosha = selected_kosha_input
+
+    # ㊱ 行政区分選択
+    dist_list = sorted(df["行政区分"].dropna().unique())
+    selected_dist_input = st.multiselect(
+        "行政区分を選択", ["🟡 全行政区分選択"] + dist_list,
+        default=["🟡 全行政区分選択"], key="ms_dist"
+    )
+    actual_dist = dist_list if "🟡 全行政区分選択" in selected_dist_input or not selected_dist_input else selected_dist_input
+
+    # ⑳’’’ 中学校選択
+    school_candidate_mask = (
+        (df["管轄本部"].isin(actual_honbu)) & 
+        ((df["管轄校舎１"].isin(actual_kosha)) | (df["管轄校舎２"].isin(actual_kosha))) &
+        (df["行政区分"].isin(actual_dist))
+    )
+    school_candidate = sorted(df[school_candidate_mask]["中学校名"].dropna().unique())
+
+    if "ms_school" in st.session_state:
+        extra_schools = [s for s in st.session_state["ms_school"] if s != "🔴 全中学校選択"]
+        school_display_options = sorted(list(set(school_candidate) | set(extra_schools)))
+    else:
+        school_display_options = school_candidate
+
+    selected_schools_input = st.multiselect(
+        "中学校を選択", ["🔴 全中学校選択"] + school_display_options,
+        default=["🔴 全中学校選択"], key="ms_school"
+    )
+    actual_schools = school_candidate if "🔴 全中学校選択" in selected_schools_input or not selected_schools_input else selected_schools_input
+
+    filtered_display_df = df[
+        (df["中学校名"].isin(actual_schools)) &
+        ((df["管轄校舎１"].isin(actual_kosha)) | (df["管轄校舎２"].isin(actual_kosha))) &
+        (df["行政区分"].isin(actual_dist))
+    ]
+
+# 選択範囲の年度リスト
+years_in_range = year_columns[year_columns.index(start_year):year_columns.index(end_year) + 1]
+
+# スタイル関数
+def color_diff(val):
+    if pd.isna(val) or val == 0: return ""
+    return "background-color: #d0ebff" if val > 0 else "background-color: #ffe0e0"
+
+with col2:
+    # ⑯ 中学校ごとの人数推移
+    st.subheader("🏫 中学校ごとの人数推移詳細")
+
+    for school_name in actual_schools:
+        with st.expander(f"📍 {school_name}", expanded=True):
+            school_data = filtered_display_df[filtered_display_df["中学校名"] == school_name]
+            
+            s_series = school_data[year_columns[::-1]].sum() 
+            s_diff = s_series.diff()
+            s_pct = s_series.pct_change() * 100
+            
+            school_mini_df = pd.DataFrame({"項目": ["人数", "前年比増減", "前年比％"]})
+            for yr in years_in_range:
+                header_name = f"{yr}\n({get_grade_label(yr)})"
+                school_mini_df[header_name] = [s_series[yr], s_diff[yr], s_pct[yr]]
+
+            avg_3 = s_series[current_3_grades].mean()
+            avg_long = s_series[long_term_range].mean()
+            diff_avg = avg_3 - avg_long
+            pct_avg = (diff_avg / avg_long * 100) if avg_long != 0 else np.nan
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("現在の3学年平均", f"{avg_3:.1f}人")
+            m2.metric("長期平均(1995-現中1)", f"{avg_long:.1f}人")
+            m3.metric("比較増減数", f"{diff_avg:+.1f}人", delta=f"{diff_avg:.1f}")
+            m4.metric("比較％", f"{pct_avg:+.1f}%", delta=f"{pct_avg:.1f}%")
+
+            st.dataframe(
+                school_mini_df.set_index("項目").style
+                .format(subset=pd.IndexSlice[["人数"], :], formatter="{:.0f}")
+                .format(subset=pd.IndexSlice[["前年比増減"], :], formatter="{:+.0f}")
+                .format(subset=pd.IndexSlice[["前年比％"], :], formatter="{:+.1f}%")
+                .apply(lambda x: [color_diff(v) if x.name in ["前年比増減", "前年比％"] else "" for v in x], axis=1),
+                use_container_width=True
+            )
+
+    # 総合計・集計セクション
+    st.divider()
+    
+    def get_yoy_df(base_df, target_years):
+        all_years_rev = year_columns[::-1]
+        sum_series = base_df[all_years_rev].sum()
+        diff_series = sum_series.diff()
+        pct_series = sum_series.pct_change() * 100
+        res = pd.DataFrame({
+            "人数": sum_series[target_years][::-1],
+            "前年比増減": diff_series[target_years][::-1],
+            "前年比％": pct_series[target_years][::-1]
+        })
+        return res
+
+    total_mask = (
+        (df["管轄本部"].isin(actual_honbu)) & 
+        (df["中学校名"].isin(actual_schools)) & 
+        ((df["管轄校舎１"].isin(actual_kosha)) | (df["管轄校舎２"].isin(actual_kosha))) &
+        (df["行政区分"].isin(actual_dist))
+    )
+    total_display_df = df[total_mask]
+
+    st.subheader("📊 選択した条件の総合計")
+    total_yoy = get_yoy_df(total_display_df, years_in_range)
+    st.dataframe(
+        total_yoy.style.format({"人数": "{:.0f}", "前年比増減": "{:+.0f}", "前年比％": "{:+.1f}%"})
+        .map(color_diff, subset=["前年比増減", "前年比％"]),
+        use_container_width=True
+    )
+
+    c_sub1, c_sub2 = st.columns(2)
+    with c_sub1:
+        st.subheader("🏢 校舎別集計")
+        k1_df = filtered_display_df[filtered_display_df["管轄校舎１"].isin(actual_kosha)]
+        k1_grouped = k1_df.groupby("管轄校舎１")[years_in_range].sum()
+        k2_df = filtered_display_df[filtered_display_df["管轄校舎２"].isin(actual_kosha)].copy()
+        if not k2_df.empty:
+            k2_df["管轄校舎１"] = k2_df["管轄校舎２"]
+            k2_grouped = k2_df.groupby("管轄校舎１")[years_in_range].sum()
+            kosha_grouped = k1_grouped.add(k2_grouped, fill_value=0)
+        else:
+            kosha_grouped = k1_grouped
+        st.dataframe(kosha_grouped.style.format("{:.0f}"), use_container_width=True)
+
+    with c_sub2:
+        st.subheader("🏬 本部別集計")
+        honbu_grouped = total_display_df.groupby("管轄本部")[years_in_range].sum()
+        st.dataframe(honbu_grouped.style.format("{:.0f}"), use_container_width=True)
+
+    # ランキング
+    st.divider()
+    st.subheader("🚩 参考：選択年度範囲での増減ランキング")
+    rank_base = filtered_display_df.groupby("中学校名")[year_columns].sum()
+    rank_base["期間増減率"] = ((rank_base[start_year] - rank_base[end_year]) / rank_base[end_year].replace(0, np.nan)) * 100
+    
+    r_col1, r_col2 = st.columns(2)
+    with r_col1:
+        st.caption(f"📈 増加率上位5校 ({end_year} → {start_year})")
+        st.table(rank_base[["期間増減率", end_year, start_year]].sort_values("期間増減率", ascending=False).head(5)
+                 .style.format({"期間増減率": "{:+.1f}%", end_year: "{:.0f}", start_year: "{:.0f}"}))
+    with r_col2:
+        st.caption(f"📉 減少率上位5校 ({end_year} → {start_year})")
+        st.table(rank_base[["期間増減率", end_year, start_year]].sort_values("期間増減率", ascending=True).head(5)
+                 .style.format({"期間増減率": "{:+.1f}%", end_year: "{:.0f}", start_year: "{:.0f}"}))
+
+    # ---------------------------------------------------------
+    # ㊲ ㊳ ㊴ NotebookLM 連携セクション
+    # ---------------------------------------------------------
+    st.divider()
+    st.subheader("🤖 AIチャットで深掘り分析")
+    
+    # リンク1
+    st.write("以下のURLをクリックすると、GooglenotebookLMのチャットでこのデータについて質問できます。")
+    st.markdown("🔗 [NotebookLM: 中学生人数データ分析](https://notebooklm.google.com/notebook/5ddd071a-3021-4a17-817c-4f1c901c56f1)")
+    
+    st.write("") # スペース
+    
+    # リンク2
+    st.write("以下のURLをクリックすると、GooglenotebookLMのチャットで愛知県内小学生人数変動データについて質問できます。")
+    st.markdown("🔗 [NotebookLM: 愛知県内小学生人数変動データ](https://notebooklm.google.com/notebook/2507c064-1791-4080-af9f-114552f714ab?authuser=1)")
